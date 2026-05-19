@@ -1383,7 +1383,6 @@ function loop(){
   var t=Date.now()/1000;
   ensureBg(W,H);ctx.drawImage(bgCanvas,0,0);
   if(theme==='unicorn'){tickUnicornScene(W,H);drawUnicornDynamic(ctx,W,H,t);}
-  var nextLetter=coalescing?null:currentWord[typedIdx];
   particles.forEach(function(p){
     if(p.dissipating){
       if(theme==='unicorn'){
@@ -1453,7 +1452,9 @@ function loop(){
     }
     if(p.alpha<=0)return;
     ctx.save();ctx.globalAlpha=Math.max(0,p.alpha);
-    var isNext=!p.typed&&p.letter===nextLetter;
+    // Match by position in the word (idx), not just letter — so duplicate letters
+    // (e.g. both O's in "moon") don't both highlight as active simultaneously.
+    var isNext=!coalescing&&!p.typed&&p.idx===typedIdx;
     if(theme==='cloud')drawCloudLetter(p,isNext);
     else if(theme==='soup')drawNoodleLetter(p,t,isNext);
     else drawGemLetter(p,t,isNext);
@@ -1467,6 +1468,6 @@ function loop(){
 loadState();
 updateScoreUI();
 </script>
-<div id="versionDisplay">v1.3.1</div>
+<div id="versionDisplay">v1.3.2</div>
 </body>
 </html>
