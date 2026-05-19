@@ -267,6 +267,7 @@ function startGame(t){
   }else{
     wordList=shuffle(LEVELS[level].slice()).slice(0,12);wordIdx=0;
   }
+  if(theme==='unicorn')initUnicornScene();
   document.getElementById('levelLabel').textContent='Level '+(level+1);
   updateProgress();loadWord();
   if(animId)cancelAnimationFrame(animId);
@@ -334,13 +335,17 @@ function onWordComplete(){
   coalescing=true;
   var pts=wordScore();score+=pts;addThemeScore(pts);updateScoreUI();saveState();playSuccess();
   var n=currentWord.length;
+  var bannerDelay=theme==='unicorn'?700:(n-1)*80+600;
   setTimeout(function(){
     showSuccessBanner(PRAISE[Math.floor(Math.random()*PRAISE.length)],'+'+pts+' points!');
-  },(n-1)*80+600);
-  coalesceParticles(function(){dissipateParticles(function(){
-    wordIdx++;updateProgress();
-    if(wordIdx>=wordList.length)setTimeout(onLevelComplete,300);else loadWord();
-  })});
+  },bannerDelay);
+  coalesceParticles(function(){
+    if(theme==='unicorn')triggerEnergize();
+    dissipateParticles(function(){
+      wordIdx++;updateProgress();
+      if(wordIdx>=wordList.length)setTimeout(onLevelComplete,300);else loadWord();
+    });
+  });
 }
 
 function onLevelComplete(){
@@ -382,15 +387,18 @@ function spawnParticles(){
     var x,y;
     if(theme==='soup'){var p=randInBowl();x=p.x;y=p.y}
     else if(theme==='unicorn'){
-      // upper-half band, but avoid the foreground unicorn rect
+      // Anchor avoidance at the HOVER position (where next unicorn will land),
+      // not current uniFG (which is mid-exit/entry when this fires).
+      var hx=W*0.5;
+      var hy=fu.baseY||H*0.50;
+      var hw=uniFG.w>0?uniFG.w:Math.min(W*0.38,H*0.55);
+      var hh=uniFG.h>0?uniFG.h:hw*130/200;
       for(var att=0;att<40;att++){
         x=rnd(W*.08,W*.92);
-        y=rnd(H*.08,Math.min(safeB-20,H*.58));
-        if(uniFG.w>0){
-          var dx=x-uniFG.x,dy=y-uniFG.y;
-          var rx=uniFG.w*.6,ry=uniFG.h*.65;
-          if((dx*dx)/(rx*rx)+(dy*dy)/(ry*ry)<1.05)continue;
-        }
+        y=rnd(H*.08,Math.min(safeB-20,H*.56));
+        var dx=x-hx,dy=y-hy;
+        var rx=hw*.7,ry=hh*.75;
+        if((dx*dx)/(rx*rx)+(dy*dy)/(ry*ry)<1.1)continue;
         break;
       }
     }
@@ -401,23 +409,22 @@ function spawnParticles(){
 
 function coalesceParticles(cb){
   var W=canvas.width,n=currentWord.length;
-  var spacing=Math.min(108,W*.15);
-  var ty;
-  if(theme==='soup')ty=bowlY;
-  else if(theme==='unicorn'&&uniFG.w>0)ty=uniFG.y-uniFG.h*.45;
-  else ty=canvas.height*.38;
-  // For unicorn, also pull horizontally toward the unicorn's horn for a magical "absorb" feel
-  var cxBase=W/2;
-  if(theme==='unicorn'&&uniFG.w>0){
-    cxBase=uniFG.x+(uniFG.flip?1:-1)*uniFG.w*.05;
+  if(theme==='unicorn'){
+    // All particles start coalescing immediately. Target (tx,ty) gets recomputed each frame
+    // in the main loop so the cluster follows the moving unicorn's face.
+    particles.forEach(function(p){p.coalescing=true});
+    setTimeout(cb,700);
+    return;
   }
-  var sx=cxBase-(n-1)*spacing/2;
+  var spacing=Math.min(108,W*.15);
+  var ty=theme==='soup'?bowlY:canvas.height*.38;
+  var sx=W/2-(n-1)*spacing/2;
   particles.forEach(function(p,i){
     setTimeout(function(){p.coalescing=true;p.tx=sx+p.idx*spacing;p.ty=ty},p.idx*80);
   });
   setTimeout(cb,(n-1)*80+900);
 }
-function dissipateParticles(cb){particles.forEach(function(p){p.dissipating=true});setTimeout(cb,900)}
+function dissipateParticles(cb){particles.forEach(function(p){p.dissipating=true});setTimeout(cb,theme==='unicorn'?550:900)}
 
 // ── SUCCESS BANNER (drawn on canvas) ──
 function showSuccessBanner(text,pts){
@@ -978,36 +985,323 @@ function drawUnicornStatic(c,W,H){
   }
   c.restore();
 
-  // 5. DISTANT BACKGROUND UNICORNS
-  var uKey=isDay?'uDay':isTwi?'uTwi':'uNight';
+  // 5. ISLANDS — placed to frame the foreground unicorn from corners
+  var p=phase;
+  drawIslandImg(c,'p'+p,W*0.13,H*0.78,1.05*Math.min(W,H)/320,W,H);   // bottom-left pines
+  drawIslandImg(c,'s'+p,W*0.92,H*0.45,1.0*Math.min(W,H)/320,W,H);    // far-right stones
+  drawIslandImg(c,'c'+p,W*0.30,H*0.95,1.1*Math.min(W,H)/320,W,H);    // crystal island
+  drawIslandImg(c,'t'+p,W*0.82,H*0.92,1.15*Math.min(W,H)/320,W,H);   // big tree-and-waterfall
+  // Unicorns (distant + foreground) are drawn dynamically each frame — see drawUnicornDynamic.
+}
+
+// ── UNICORN DYNAMIC SCENE: state machine, distant drift, sparkles, bursts, trails, shooting stars ──
+var fu={state:'hovering',t:0,x:0,y:0,sx:0,sy:0,tx:0,ty:0,flip:false,baseY:0,glow:0,nextExitSide:'right'};
+var distUnis=[];
+var sparkles=[];
+var burst=[];
+var shootStars=[];
+var uniLastT=0;
+
+function newSparkle(W,H){
+  return {
+    x:Math.random()*W,
+    y:Math.random()*H*0.88,
+    vx:rnd(-0.18,0.18),
+    vy:rnd(-0.12,0.06),
+    life:rnd(0,2),
+    maxLife:rnd(2.4,5.2),
+    size:rnd(1.4,3.4),
+    hue:Math.random()*360,
+    twinkleSpeed:rnd(2.8,5.5)
+  };
+}
+
+function spawnShootingStar(W,H){
+  shootStars.push({
+    x:rnd(W*0.05,W*0.7),
+    y:rnd(H*0.04,H*0.28),
+    vx:rnd(5,9),
+    vy:rnd(1,3),
+    life:0,
+    maxLife:rnd(0.8,1.4)
+  });
+}
+
+function initUnicornScene(){
+  var W=canvas.width,H=canvas.height;
+  var uW=Math.min(W*0.38,H*0.55),uH=uW*130/200;
+  uniFG.w=uW;uniFG.h=uH;
+  var hoverY=H*0.50;
+  fu.state='hovering';fu.t=0;
+  fu.x=W*0.5;fu.y=hoverY;fu.baseY=hoverY;
+  fu.flip=(level===2);
+  fu.glow=0;
+  fu.nextExitSide=Math.random()>0.5?'right':'left';
+  uniFG.x=fu.x;uniFG.y=fu.y;uniFG.flip=fu.flip;
+  // distant drifting unicorns
+  distUnis=[];
+  for(var i=0;i<3;i++){
+    var vx=rnd(0.22,0.55)*(Math.random()>0.5?1:-1);
+    distUnis.push({
+      x:rnd(W*0.1,W*0.9),
+      y:rnd(H*0.13,H*0.40),
+      vx:vx,
+      scale:rnd(0.45,0.85),
+      opacity:rnd(0.45,0.72),
+      bobPhase:Math.random()*Math.PI*2,
+      flip:vx>0
+    });
+  }
+  // ambient sparkles
+  sparkles=[];
+  var sparkleCount=level===0?34:level===1?46:62;
+  for(var i=0;i<sparkleCount;i++)sparkles.push(newSparkle(W,H));
+  burst=[];
+  shootStars=[];
+  uniLastT=performance.now();
+}
+
+function triggerEnergize(){
+  if(fu.state!=='hovering')return;
+  fu.state='energizing';
+  fu.t=0;
+  var hornX=fu.x+(fu.flip?1:-1)*uniFG.w*0.26;
+  var hornY=fu.y-uniFG.h*0.45;
+  for(var i=0;i<70;i++){
+    var ang=(i/70)*Math.PI*2+rnd(-0.15,0.15);
+    var spd=rnd(2.5,6);
+    burst.push({
+      x:hornX,y:hornY,
+      vx:Math.cos(ang)*spd,
+      vy:Math.sin(ang)*spd-0.4,
+      life:0,maxLife:rnd(0.7,1.3),
+      hue:(i*5.2+performance.now()*0.05)%360,
+      size:rnd(2.5,5),
+      gravity:0.08,
+      isTrail:false
+    });
+  }
+}
+
+function tickUnicornScene(W,H){
+  var now=performance.now();
+  var dt=Math.min(50,now-uniLastT);
+  uniLastT=now;
+  fu.t+=dt;
+  var uW=uniFG.w;
+  switch(fu.state){
+    case 'hovering':
+      var ph=fu.t*0.0008;
+      fu.x=W*0.5+Math.sin(ph)*W*0.045;
+      fu.y=fu.baseY+Math.sin(ph*2)*10;
+      fu.glow*=0.9;
+      break;
+    case 'energizing':
+      var ep=Math.min(1,fu.t/700);
+      fu.x=W*0.5+Math.sin(fu.t*0.025)*5;
+      fu.y=fu.baseY+Math.sin(fu.t*0.035)*6-ep*10;
+      fu.glow=Math.min(2.4,fu.t/250);
+      if(fu.t>=700){
+        fu.state='exiting';
+        fu.t=0;
+        fu.sx=fu.x;fu.sy=fu.y;
+        fu.tx=fu.nextExitSide==='right'?W+uW:-uW;
+        fu.ty=fu.baseY+rnd(-80,20);
+        fu.flip=(fu.nextExitSide==='right');
+      }
+      break;
+    case 'exiting':
+      var p=Math.min(1,fu.t/800);
+      var ease=p*p*p;
+      fu.x=fu.sx+(fu.tx-fu.sx)*ease;
+      fu.y=fu.sy+(fu.ty-fu.sy)*ease;
+      fu.glow=Math.max(0,2-p*2.5);
+      // rainbow trail behind
+      if(p<0.92 && Math.random()<0.88){
+        burst.push({
+          x:fu.x+rnd(-uW*0.1,uW*0.1),
+          y:fu.y+rnd(-uniFG.h*0.1,uniFG.h*0.1),
+          vx:rnd(-0.3,0.3),
+          vy:rnd(-0.2,0.2),
+          life:0,maxLife:rnd(0.5,0.95),
+          hue:((fu.t*1.5)+p*220)%360,
+          size:rnd(3,7),
+          gravity:0.02,
+          isTrail:true
+        });
+      }
+      if(fu.t>=800){
+        fu.state='entering';
+        fu.t=0;
+        var enterFrom=(fu.nextExitSide==='right')?'left':'right';
+        fu.sx=(enterFrom==='left')?-uW*1.2:W+uW*1.2;
+        fu.sy=fu.baseY+rnd(-40,40);
+        fu.tx=W*0.5;
+        fu.ty=fu.baseY;
+        fu.flip=(enterFrom==='left');
+        fu.x=fu.sx;fu.y=fu.sy;
+        fu.glow=0;
+        fu.nextExitSide=(enterFrom==='left')?'right':'left';
+      }
+      break;
+    case 'entering':
+      var p=Math.min(1,fu.t/800);
+      var ease=1-Math.pow(1-p,3);
+      fu.x=fu.sx+(fu.tx-fu.sx)*ease;
+      fu.y=fu.sy+(fu.ty-fu.sy)*ease;
+      fu.glow=p*0.45;
+      if(fu.t>=800){fu.state='hovering';fu.t=0;}
+      break;
+  }
+  uniFG.x=fu.x;uniFG.y=fu.y;uniFG.flip=fu.flip;
+  // distant unicorn drift
+  distUnis.forEach(function(u){
+    u.x+=u.vx;
+    u.y+=Math.sin(now*0.001+u.bobPhase)*0.18;
+    var uw=W*0.15*u.scale;
+    if(u.vx>0 && u.x>W+uw){u.x=-uw;u.y=rnd(H*0.13,H*0.40);}
+    else if(u.vx<0 && u.x<-uw){u.x=W+uw;u.y=rnd(H*0.13,H*0.40);}
+  });
+  // tick sparkles
+  for(var i=sparkles.length-1;i>=0;i--){
+    var s=sparkles[i];
+    s.life+=dt/1000;s.x+=s.vx;s.y+=s.vy;
+    if(s.life>=s.maxLife||s.x<-10||s.x>W+10||s.y<-10||s.y>H+10){
+      sparkles.splice(i,1);
+      sparkles.push(newSparkle(W,H));
+    }
+  }
+  // tick burst (energize + trail)
+  for(var i=burst.length-1;i>=0;i--){
+    var b=burst[i];
+    b.life+=dt/1000;b.x+=b.vx;b.y+=b.vy;b.vy+=(b.gravity||0);
+    if(b.life>=b.maxLife)burst.splice(i,1);
+  }
+  // shooting stars (night)
+  if(level===2 && Math.random()<0.003)spawnShootingStar(W,H);
+  for(var i=shootStars.length-1;i>=0;i--){
+    var ss=shootStars[i];
+    ss.x+=ss.vx;ss.y+=ss.vy;ss.life+=dt/1000;
+    if(ss.life>=ss.maxLife)shootStars.splice(i,1);
+  }
+}
+
+function drawUnicornDynamic(c,W,H,t){
+  if(!gameRunning||theme!=='unicorn')return;
+  // 1. AMBIENT SPARKLES (behind everything else)
+  c.save();
+  sparkles.forEach(function(s){
+    var p=s.life/s.maxLife;
+    var twinkle=Math.sin(p*Math.PI*s.twinkleSpeed)*0.5+0.5;
+    var fade=Math.sin(p*Math.PI);
+    var alpha=fade*twinkle*0.85;
+    if(alpha<0.025)return;
+    c.globalAlpha=alpha;
+    c.fillStyle='hsl('+s.hue+',100%,82%)';
+    c.shadowColor='hsl('+s.hue+',100%,68%)';
+    c.shadowBlur=9;
+    c.beginPath();c.arc(s.x,s.y,s.size,0,Math.PI*2);c.fill();
+    if(s.size>2.2){
+      c.globalAlpha=alpha*0.85;
+      c.strokeStyle='#fff';c.lineWidth=0.7;c.shadowBlur=0;
+      c.beginPath();
+      c.moveTo(s.x-s.size*2,s.y);c.lineTo(s.x+s.size*2,s.y);
+      c.moveTo(s.x,s.y-s.size*2);c.lineTo(s.x,s.y+s.size*2);
+      c.stroke();
+    }
+  });
+  c.restore();
+  // 2. SHOOTING STARS (night)
+  shootStars.forEach(function(ss){
+    var p=ss.life/ss.maxLife;
+    var alpha=Math.sin(p*Math.PI)*0.95;
+    c.save();
+    c.globalAlpha=alpha;
+    c.strokeStyle='#fffacc';c.shadowColor='#fffacc';c.shadowBlur=12;
+    c.lineWidth=2.5;c.lineCap='round';
+    c.beginPath();c.moveTo(ss.x,ss.y);c.lineTo(ss.x-ss.vx*10,ss.y-ss.vy*10);c.stroke();
+    c.fillStyle='#ffffff';
+    c.beginPath();c.arc(ss.x,ss.y,2.5,0,Math.PI*2);c.fill();
+    c.restore();
+  });
+  // 3. DISTANT BACKGROUND UNICORNS (drifting)
+  var phase=uniPhase();
+  var uKey=phase==='Day'?'uDay':phase==='Twi'?'uTwi':'uNight';
   var uImg=UNI_IMG[uKey];
   var uReady=UNI_IMG[uKey+'_ok'];
-  var glow=isNight?1:isTwi?0.4:0;
   if(uReady){
-    drawUnicornImg(c,uImg,W*0.32,H*0.30,W*0.13,W*0.085,0.55,false,glow*0.6);
-    drawUnicornImg(c,uImg,W*0.65,H*0.22,W*0.11,W*0.072,0.5,true,glow*0.5);
-    drawUnicornImg(c,uImg,W*0.22,H*0.50,W*0.18,W*0.117,0.75,false,glow*0.7);
+    var bgGlow=phase==='Night'?0.7:phase==='Twi'?0.3:0;
+    distUnis.forEach(function(u){
+      var uw=W*0.15*u.scale,uh=uw*130/200;
+      drawUnicornImg(c,uImg,u.x,u.y,uw,uh,u.opacity,u.flip,bgGlow*u.scale*0.7);
+    });
   }
-
-  // 6. ISLANDS — placed to frame the foreground unicorn from corners
-  var p=phase;
-  // bottom-left small island with pines, slightly higher
-  drawIslandImg(c,'p'+p,W*0.13,H*0.78,1.05*Math.min(W,H)/320,W,H);
-  // far-right stones, mid level
-  drawIslandImg(c,'s'+p,W*0.92,H*0.45,1.0*Math.min(W,H)/320,W,H);
-  // crystal island bottom-center-left
-  drawIslandImg(c,'c'+p,W*0.30,H*0.95,1.1*Math.min(W,H)/320,W,H);
-  // big tree-and-waterfall island bottom-right
-  drawIslandImg(c,'t'+p,W*0.82,H*0.92,1.15*Math.min(W,H)/320,W,H);
-
-  // 7. FOREGROUND UNICORN (large, centered) — Night faces right, others face left
-  var uW=Math.min(W*0.42,H*0.65);
-  var uH=uW*130/200;
-  var ucx=W*(isNight?0.42:0.55);
-  var ucy=H*0.62;
-  uniFG.x=ucx;uniFG.y=ucy;uniFG.w=uW;uniFG.h=uH;uniFG.flip=isNight;
+  // 4. TRAIL particles (behind foreground unicorn)
+  burst.forEach(function(b){
+    if(!b.isTrail)return;
+    var p=b.life/b.maxLife;
+    var alpha=(1-p)*0.7;
+    c.save();
+    c.globalAlpha=alpha;
+    c.fillStyle='hsl('+b.hue+',100%,68%)';
+    c.shadowColor='hsl('+b.hue+',100%,55%)';
+    c.shadowBlur=18;
+    c.beginPath();c.arc(b.x,b.y,b.size+p*8,0,Math.PI*2);c.fill();
+    c.restore();
+  });
+  // 5. FOREGROUND UNICORN
   if(uReady){
-    drawUnicornImg(c,uImg,ucx,ucy,uW,uH,1.0,isNight,isNight?1.2:isTwi?0.5:0);
+    var baseGlow=phase==='Night'?1.0:phase==='Twi'?0.4:0;
+    var totalGlow=Math.max(baseGlow,fu.glow);
+    drawUnicornImg(c,uImg,fu.x,fu.y,uniFG.w,uniFG.h,1.0,fu.flip,totalGlow);
+    // energize body shimmer
+    if(fu.glow>0.4){
+      var shimmerAlpha=Math.min(1,(fu.glow-0.4)*0.7);
+      c.save();
+      c.globalAlpha=shimmerAlpha;
+      c.globalCompositeOperation='lighter';
+      var sh=c.createRadialGradient(fu.x,fu.y,0,fu.x,fu.y,uniFG.w*0.5);
+      sh.addColorStop(0,'rgba(255,255,255,0.9)');
+      sh.addColorStop(0.45,'rgba(255,220,255,0.4)');
+      sh.addColorStop(1,'rgba(255,220,255,0)');
+      c.fillStyle=sh;
+      c.fillRect(fu.x-uniFG.w*0.6,fu.y-uniFG.h*0.7,uniFG.w*1.2,uniFG.h*1.4);
+      c.restore();
+    }
+  }
+  // 6. ENERGIZE BURST particles (in front of unicorn)
+  burst.forEach(function(b){
+    if(b.isTrail)return;
+    var p=b.life/b.maxLife;
+    var alpha=(1-p)*0.95;
+    c.save();
+    c.globalAlpha=alpha;
+    c.fillStyle='hsl('+b.hue+',100%,70%)';
+    c.shadowColor='hsl('+b.hue+',100%,60%)';
+    c.shadowBlur=14;
+    c.beginPath();c.arc(b.x,b.y,b.size,0,Math.PI*2);c.fill();
+    c.fillStyle='#ffffff';c.globalAlpha=alpha*0.9;c.shadowBlur=0;
+    c.beginPath();c.arc(b.x,b.y,b.size*0.4,0,Math.PI*2);c.fill();
+    c.restore();
+  });
+  // 7. EXPANDING RAINBOW RING (during energize)
+  if(fu.state==='energizing' && fu.t<700){
+    var rp=fu.t/700;
+    var maxR=uniFG.w*1.1;
+    var hornX=fu.x+(fu.flip?1:-1)*uniFG.w*0.26;
+    var hornY=fu.y-uniFG.h*0.45;
+    var ringColors=['#ff5a8a','#ff9a3c','#ffd84a','#5fe890','#4ab8ff','#b48aff'];
+    c.save();
+    c.globalAlpha=(1-rp)*0.92;
+    c.lineWidth=3.5;
+    for(var ri=0;ri<6;ri++){
+      var r=rp*maxR-ri*7;
+      if(r<=0)continue;
+      c.strokeStyle=ringColors[ri];
+      c.shadowColor=ringColors[ri];c.shadowBlur=6;
+      c.beginPath();c.arc(hornX,hornY,r,0,Math.PI*2);c.stroke();
+    }
+    c.restore();
   }
 }
 
@@ -1035,15 +1329,37 @@ function loop(){
   ctx.clearRect(0,0,W,H);
   var t=Date.now()/1000;
   ensureBg(W,H);ctx.drawImage(bgCanvas,0,0);
+  if(theme==='unicorn'){tickUnicornScene(W,H);drawUnicornDynamic(ctx,W,H,t);}
   var nextLetter=coalescing?null:currentWord[typedIdx];
   particles.forEach(function(p){
     if(p.dissipating){
-      p.alpha-=.022;
-      if(theme==='soup'){p.vy+=.018;p.size-=.25}
-      else if(theme==='unicorn'){p.vy-=.022;p.size-=.6}
-      else{p.vy-=.018;p.size+=.35}
+      if(theme==='unicorn'){
+        // explode outward from horn as part of energize burst
+        p.alpha-=.055;
+        p.size-=.7;
+        var hx=uniFG.x+(uniFG.flip?1:-1)*uniFG.w*0.26;
+        var hy=uniFG.y-uniFG.h*0.45;
+        var dx=p.x-hx,dy=p.y-hy;
+        var d=Math.max(1,Math.sqrt(dx*dx+dy*dy));
+        p.x+=(dx/d)*4.5;
+        p.y+=(dy/d)*4.5;
+      }else if(theme==='soup'){p.alpha-=.022;p.vy+=.018;p.size-=.25}
+      else{p.alpha-=.022;p.vy-=.018;p.size+=.35}
     }else if(p.coalescing){
-      p.x+=(p.tx-p.x)*.08;p.y+=(p.ty-p.y)*.08;
+      if(theme==='unicorn'){
+        // target = tight cluster in front of unicorn's face, recomputed each frame
+        var fx=uniFG.x+(uniFG.flip?1:-1)*uniFG.w*0.30;
+        var fy=uniFG.y-uniFG.h*0.05;
+        var nw=Math.max(1,currentWord.length);
+        var ang=(p.idx/nw)*Math.PI*2;
+        var rOff=uniFG.w*0.07;
+        p.tx=fx+Math.cos(ang)*rOff;
+        p.ty=fy+Math.sin(ang)*rOff;
+        p.x+=(p.tx-p.x)*.18;
+        p.y+=(p.ty-p.y)*.18;
+      }else{
+        p.x+=(p.tx-p.x)*.08;p.y+=(p.ty-p.y)*.08;
+      }
     }else{
       p.x+=p.vx;p.y+=p.vy+Math.sin(t+p.phase)*.2;
       if(theme==='soup'){
@@ -1098,6 +1414,6 @@ function loop(){
 loadState();
 updateScoreUI();
 </script>
-<div id="versionDisplay">v1.2.0</div>
+<div id="versionDisplay">v1.3.0</div>
 </body>
 </html>
