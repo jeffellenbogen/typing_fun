@@ -387,23 +387,28 @@ function spawnParticles(){
     var x,y;
     if(theme==='soup'){var p=randInBowl();x=p.x;y=p.y}
     else if(theme==='unicorn'){
-      // Anchor avoidance at the HOVER position (where next unicorn will land),
-      // not current uniFG (which is mid-exit/entry when this fires).
+      // Cluster letters in an arc around the upper half of the unicorn,
+      // close enough that the active-letter highlight reads as part of "this unicorn's word".
       var hx=W*0.5;
       var hy=fu.baseY||H*0.50;
       var hw=uniFG.w>0?uniFG.w:Math.min(W*0.38,H*0.55);
-      var hh=uniFG.h>0?uniFG.h:hw*130/200;
-      for(var att=0;att<40;att++){
-        x=rnd(W*.08,W*.92);
-        y=rnd(H*.08,Math.min(safeB-20,H*.56));
-        var dx=x-hx,dy=y-hy;
-        var rx=hw*.7,ry=hh*.75;
-        if((dx*dx)/(rx*rx)+(dy*dy)/(ry*ry)<1.1)continue;
-        break;
-      }
+      var n=currentWord.length;
+      // Arc spans wider for longer words. ~120° for n=3, up to ~200° for long words.
+      var arcSpan=Math.min(Math.PI*1.15, Math.max(Math.PI*0.6, n*0.42));
+      var arcStart=-Math.PI/2 - arcSpan/2;
+      var tPos=(n<=1)?0.5:li/(n-1);
+      var ang=arcStart + arcSpan*tPos + rnd(-0.07,0.07);
+      var r=rnd(hw*0.62, hw*0.85);
+      x=hx + Math.cos(ang)*r;
+      y=hy + Math.sin(ang)*r*0.62; // squash vertically — keep letters above keyboard
+      // gentle initial drift back toward unicorn so they don't immediately scatter
+      // (we still randomize vx/vy below, but bias toward center)
+      x=Math.max(W*0.06, Math.min(W*0.94, x));
+      y=Math.max(H*0.07, Math.min(safeB-25, y));
     }
     else{x=rnd(W*.1,W*.9);y=rnd(H*.07,Math.min(safeB,H*.74))}
-    particles.push({letter:letter,idx:li,x:x,y:y,vx:rnd(-.3,.3),vy:rnd(-.2,.2),size:rnd(52,68),typed:false,alpha:1,phase:Math.random()*Math.PI*2,coalescing:false,tx:0,ty:0,dissipating:false,wobble:Math.random()*Math.PI*2,wrongFlash:false});
+    var vscale=theme==='unicorn'?0.45:1; // gentler drift so unicorn-arc cluster stays tight
+    particles.push({letter:letter,idx:li,x:x,y:y,vx:rnd(-.3,.3)*vscale,vy:rnd(-.2,.2)*vscale,size:rnd(52,68),typed:false,alpha:1,phase:Math.random()*Math.PI*2,coalescing:false,tx:0,ty:0,dissipating:false,wobble:Math.random()*Math.PI*2,wrongFlash:false});
   });
 }
 
@@ -497,25 +502,59 @@ function drawNoodleLetter(p,t,isNext){
 }
 
 function drawGemLetter(p,t,isNext){
-  var x=p.x,y=p.y,s=p.size;
-  // Hue cycle: rainbow across letters + slow drift
+  // ACTIVE letter is dramatically scaled up + size-pulses, inactive is slightly smaller
+  var activeScale = isNext ? (1.38 + 0.07*Math.sin(t*5)) : (p.typed ? 1.0 : 0.92);
+  var x=p.x,y=p.y,s=p.size*activeScale;
   var baseHue=(p.idx*55+t*12)%360;
-  if(p.typed)baseHue=120;        // green tint when correct
-  if(p.wrongFlash)baseHue=0;     // red flash on wrong
+  if(p.typed)baseHue=120;
+  if(p.wrongFlash)baseHue=0;
   ctx.save();
   ctx.translate(x,y);
   ctx.rotate(Math.sin(t*0.5+p.wobble)*0.07);
 
-  // outer glow halo
-  var pulse=isNext?1+0.18*Math.sin(t*4):1;
-  var haloR=s*0.85*pulse;
+  // ACTIVE-LETTER cues: pulsing rings + bright white core (drawn behind everything else)
+  if(isNext){
+    var pulseT=Math.sin(t*4.5)*0.5+0.5;
+    // big bright colored pulsing ring
+    ctx.save();
+    ctx.globalAlpha=0.7+pulseT*0.3;
+    ctx.strokeStyle='hsla('+baseHue+',100%,78%,1)';
+    ctx.lineWidth=4+pulseT*3;
+    ctx.shadowColor='hsla('+baseHue+',100%,65%,1)';
+    ctx.shadowBlur=22;
+    ctx.beginPath();ctx.arc(0,0,s*1.05+pulseT*9,0,Math.PI*2);ctx.stroke();
+    ctx.restore();
+    // outer thin white ring (faster pulse — adds urgency)
+    var pulseT2=Math.sin(t*7.2)*0.5+0.5;
+    ctx.save();
+    ctx.globalAlpha=0.45+pulseT2*0.35;
+    ctx.strokeStyle='#ffffff';
+    ctx.lineWidth=1.8;
+    ctx.shadowColor='#ffffff';ctx.shadowBlur=14;
+    ctx.beginPath();ctx.arc(0,0,s*1.18+pulseT2*5,0,Math.PI*2);ctx.stroke();
+    ctx.restore();
+    // bright white core wash under gem
+    var coreG=ctx.createRadialGradient(0,0,0,0,0,s*1.05);
+    coreG.addColorStop(0,'rgba(255,255,255,0.9)');
+    coreG.addColorStop(0.35,'rgba(255,250,230,0.5)');
+    coreG.addColorStop(1,'rgba(255,250,230,0)');
+    ctx.fillStyle=coreG;
+    ctx.fillRect(-s*1.2,-s*1.2,s*2.4,s*2.4);
+  }
+
+  // outer glow halo (much brighter for active)
+  var pulse=isNext?1.12+0.18*Math.sin(t*4):1;
+  var haloR=s*(isNext?1.0:0.85)*pulse;
   var halo=ctx.createRadialGradient(0,0,0,0,0,haloR);
-  var glowAlpha=isNext?0.75:p.typed?0.55:0.45;
-  halo.addColorStop(0,'hsla('+baseHue+',100%,78%,'+glowAlpha+')');
-  halo.addColorStop(0.45,'hsla('+baseHue+',95%,60%,'+(glowAlpha*0.35)+')');
+  var glowAlpha=isNext?0.98:p.typed?0.55:0.35;
+  halo.addColorStop(0,'hsla('+baseHue+',100%,80%,'+glowAlpha+')');
+  halo.addColorStop(0.45,'hsla('+baseHue+',95%,62%,'+(glowAlpha*0.4)+')');
   halo.addColorStop(1,'hsla('+baseHue+',90%,50%,0)');
   ctx.fillStyle=halo;
   ctx.fillRect(-haloR,-haloR,haloR*2,haloR*2);
+
+  // Subtler opacity for non-active letters so the active one really pops
+  if(!isNext && !p.typed) ctx.globalAlpha *= 0.78;
 
   // gem body — hexagonal crystal with faceted gradient
   var gr=s*0.46;
@@ -524,25 +563,23 @@ function drawGemLetter(p,t,isNext){
     var a=i*Math.PI/3-Math.PI/2;
     pts.push([Math.cos(a)*gr,Math.sin(a)*gr]);
   }
-
-  // draw 6 facet triangles individually for crisp rainbow facets
   for(var i=0;i<6;i++){
     var p1=pts[i],p2=pts[(i+1)%6];
     var facetHue=(baseHue+i*22)%360;
-    var facetLightness=55+(i%2)*18;
+    var facetLightness=isNext?(62+(i%2)*16):(55+(i%2)*18);
     var fg=ctx.createLinearGradient(0,0,(p1[0]+p2[0])*0.5,(p1[1]+p2[1])*0.5);
-    fg.addColorStop(0,'hsla('+((facetHue+30)%360)+',95%,'+Math.min(90,facetLightness+25)+'%,0.95)');
-    fg.addColorStop(1,'hsla('+facetHue+',90%,'+facetLightness+'%,0.95)');
+    fg.addColorStop(0,'hsla('+((facetHue+30)%360)+',98%,'+Math.min(95,facetLightness+25)+'%,0.96)');
+    fg.addColorStop(1,'hsla('+facetHue+',95%,'+facetLightness+'%,0.96)');
     ctx.fillStyle=fg;
     ctx.beginPath();
     ctx.moveTo(0,0);ctx.lineTo(p1[0],p1[1]);ctx.lineTo(p2[0],p2[1]);ctx.closePath();
     ctx.fill();
   }
 
-  // crystal edge outline
-  ctx.lineWidth=Math.max(1.2,s*0.025);
+  // crystal edge outline (white for active, dark for others)
+  ctx.lineWidth=Math.max(1.2,s*(isNext?0.03:0.025));
   ctx.lineJoin='round';
-  ctx.strokeStyle='hsla('+((baseHue+200)%360)+',60%,25%,0.85)';
+  ctx.strokeStyle=isNext?'rgba(255,255,255,0.95)':'hsla('+((baseHue+200)%360)+',60%,25%,0.85)';
   ctx.beginPath();
   for(var i=0;i<6;i++){
     var pt=pts[i];
@@ -550,44 +587,60 @@ function drawGemLetter(p,t,isNext){
   }
   ctx.closePath();ctx.stroke();
 
-  // inner facet lines (subtle, white)
-  ctx.strokeStyle='rgba(255,255,255,0.45)';
+  // inner facet lines
+  ctx.strokeStyle='rgba(255,255,255,'+(isNext?0.6:0.45)+')';
   ctx.lineWidth=Math.max(0.8,s*0.015);
   ctx.beginPath();
-  for(var i=0;i<6;i++){
-    ctx.moveTo(0,0);ctx.lineTo(pts[i][0],pts[i][1]);
-  }
+  for(var i=0;i<6;i++){ctx.moveTo(0,0);ctx.lineTo(pts[i][0],pts[i][1]);}
   ctx.stroke();
 
   // sparkle highlight on upper-left facet
-  ctx.fillStyle='rgba(255,255,255,0.7)';
+  ctx.fillStyle='rgba(255,255,255,'+(isNext?0.85:0.7)+')';
   ctx.beginPath();
   ctx.ellipse(-gr*0.32,-gr*0.42,gr*0.22,gr*0.11,-0.5,0,Math.PI*2);
   ctx.fill();
 
-  // letter glyph using the same path geometry as noodle letters
-  var fs=s*0.5;
+  // letter glyph — bigger + glow for active
+  var fs=s*(isNext?0.6:0.5);
   var sc=fs/24;
-  // dark stroke shadow underneath
-  ctx.strokeStyle='rgba(40,10,80,0.85)';
-  ctx.lineWidth=Math.max(2.6,fs*0.22);
+  ctx.strokeStyle='rgba(40,10,80,0.9)';
+  ctx.lineWidth=Math.max(2.8,fs*0.24);
   ctx.lineJoin='round';ctx.lineCap='round';
   strokeLetter(p.letter.toUpperCase(),sc);
-  // bright letter on top
-  ctx.strokeStyle=p.typed?'#d8ffd8':isNext?'#fffacc':'#ffffff';
-  ctx.lineWidth=Math.max(1.6,fs*0.12);
+  // bright top stroke
+  ctx.strokeStyle=p.typed?'#d8ffd8':isNext?'#ffffff':'#ffffff';
+  ctx.lineWidth=Math.max(1.8,fs*(isNext?0.16:0.12));
   strokeLetter(p.letter.toUpperCase(),sc);
-
-  // extra sparkle for next-letter
+  // ACTIVE: white glow stroke on top
   if(isNext){
-    var ang=t*2;
-    for(var k=0;k<3;k++){
-      var sa=ang+k*Math.PI*2/3;
-      var sx=Math.cos(sa)*gr*1.15,sy=Math.sin(sa)*gr*1.15;
-      ctx.fillStyle='rgba(255,250,204,'+(0.7+0.3*Math.sin(t*5+k))+')';
+    ctx.save();
+    ctx.shadowColor='#ffffff';ctx.shadowBlur=14;
+    ctx.strokeStyle='#ffffff';
+    ctx.lineWidth=Math.max(1,fs*0.08);
+    strokeLetter(p.letter.toUpperCase(),sc);
+    ctx.restore();
+  }
+
+  // ACTIVE: 5 orbiting sparkles (was 3) — bigger and brighter
+  if(isNext){
+    var ang0=t*2.2;
+    for(var k=0;k<5;k++){
+      var sa=ang0+k*Math.PI*2/5;
+      var sx2=Math.cos(sa)*gr*1.4;
+      var sy2=Math.sin(sa)*gr*1.4;
+      var spA=0.75+0.25*Math.sin(t*5+k);
+      ctx.save();
+      ctx.shadowColor='rgba(255,250,204,1)';
+      ctx.shadowBlur=12;
+      ctx.fillStyle='rgba(255,250,204,'+spA+')';
       ctx.beginPath();
-      ctx.arc(sx,sy,Math.max(1.5,s*0.04),0,Math.PI*2);
+      ctx.arc(sx2,sy2,Math.max(2.4,s*0.07),0,Math.PI*2);
       ctx.fill();
+      ctx.fillStyle='#ffffff';
+      ctx.beginPath();
+      ctx.arc(sx2,sy2,Math.max(1,s*0.03),0,Math.PI*2);
+      ctx.fill();
+      ctx.restore();
     }
   }
   ctx.restore();
