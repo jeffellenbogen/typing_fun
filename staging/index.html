@@ -26,6 +26,10 @@ body{font-family:'Comic Sans MS','Chalkboard SE',cursive;width:100vw;height:100v
 .cloudBtn{background:linear-gradient(135deg,#c0e8ff,#f0e0ff);color:#5a3a8a}
 .soupBtn{background:linear-gradient(135deg,#c0392b,#e07830);color:#fff}
 .unicornBtn{background:linear-gradient(135deg,#ffd4e8 0%,#ffe680 35%,#a8e890 65%,#c8a8f0 100%);color:#4a1968;text-shadow:0 1px 0 rgba(255,255,255,.7)}
+#certRow{display:flex;gap:12px;margin-top:6px}
+.certBtn{padding:10px 22px;border:1.5px solid rgba(255,220,80,.35);border-radius:50px;font-family:inherit;font-size:.95rem;cursor:pointer;transition:transform .15s;box-shadow:0 4px 14px rgba(0,0,0,.3);background:rgba(255,255,255,.12);color:#f0c0e0}
+.certBtn:hover{transform:scale(1.06)}
+#certMsg{min-height:1.3em;max-width:80vw;text-align:center;font-size:.9rem;color:#ffe066;text-shadow:0 1px 4px rgba(0,0,0,.6)}
 #hud{position:absolute;top:0;left:0;right:0;height:46px;display:flex;align-items:center;justify-content:space-between;padding:0 14px;z-index:50;background:rgba(0,0,0,.35);backdrop-filter:blur(6px)}
 #levelLabel{font-size:.95rem;color:#fff;font-weight:bold;min-width:70px}
 #progressWrap{flex:1;margin:0 12px;height:12px;background:rgba(255,255,255,.2);border-radius:99px;overflow:hidden}
@@ -89,6 +93,12 @@ body{font-family:'Comic Sans MS','Chalkboard SE',cursive;width:100vw;height:100v
   <button class="themeBtn cloudBtn" onclick="startGame('cloud')">☁️ Cloud Letters</button>
   <button class="themeBtn soupBtn" onclick="startGame('soup')">🍜 Alphabet Soup</button>
   <button class="themeBtn unicornBtn" onclick="startGame('unicorn')">🦄 Unicorn World</button>
+  <div id="certRow">
+    <button class="certBtn" onclick="downloadCertificate()">📜 Save Certificate</button>
+    <button class="certBtn" onclick="document.getElementById('certUpload').click()">📤 Load Certificate</button>
+  </div>
+  <div id="certMsg"></div>
+  <input type="file" id="certUpload" accept="image/png,.png" style="display:none">
 </div>
 <div id="hud" style="display:none">
   <div id="levelLabel">Level 1</div>
@@ -168,6 +178,189 @@ function loadState(){
     if(s.progress_unicorn)unicornProgress=s.progress_unicorn;
   }catch(e){}
 }
+
+// ── CERTIFICATE SAVE/RESTORE ──
+// A downloadable PNG certificate that doubles as a save file: the full game
+// state is embedded in a tEXt metadata chunk, so uploading the same PNG
+// restores progress. Screenshots/re-encoded copies lose the chunk.
+
+// CERT-CORE-START
+var CRC_TABLE=null;
+function crc32(bytes){
+  if(!CRC_TABLE){CRC_TABLE=[];for(var n=0;n<256;n++){var c=n;for(var k=0;k<8;k++)c=(c&1)?(0xEDB88320^(c>>>1)):(c>>>1);CRC_TABLE[n]=c}}
+  var crc=0xFFFFFFFF;
+  for(var i=0;i<bytes.length;i++)crc=CRC_TABLE[(crc^bytes[i])&0xFF]^(crc>>>8);
+  return (crc^0xFFFFFFFF)>>>0;
+}
+function pngChunks(bytes){
+  var SIG=[0x89,0x50,0x4E,0x47,0x0D,0x0A,0x1A,0x0A];
+  if(bytes.length<8)return null;
+  for(var i=0;i<8;i++)if(bytes[i]!==SIG[i])return null;
+  var chunks=[],off=8;
+  while(off+8<=bytes.length){
+    var len=((bytes[off]<<24)|(bytes[off+1]<<16)|(bytes[off+2]<<8)|bytes[off+3])>>>0;
+    chunks.push({type:String.fromCharCode(bytes[off+4],bytes[off+5],bytes[off+6],bytes[off+7]),start:off,len:len});
+    off+=12+len;
+  }
+  return chunks;
+}
+function pngInsertText(bytes,keyword,text){
+  var chunks=pngChunks(bytes);if(!chunks)return null;
+  var iend=null;
+  for(var i=0;i<chunks.length;i++)if(chunks[i].type==='IEND')iend=chunks[i];
+  if(!iend)return null;
+  var data=[];
+  for(var i=0;i<keyword.length;i++)data.push(keyword.charCodeAt(i)&0xFF);
+  data.push(0);
+  for(var i=0;i<text.length;i++)data.push(text.charCodeAt(i)&0xFF);
+  var typeAndData=[0x74,0x45,0x58,0x74].concat(data);
+  var crc=crc32(Uint8Array.from(typeAndData));
+  var chunk=[(data.length>>>24)&0xFF,(data.length>>>16)&0xFF,(data.length>>>8)&0xFF,data.length&0xFF]
+    .concat(typeAndData,[(crc>>>24)&0xFF,(crc>>>16)&0xFF,(crc>>>8)&0xFF,crc&0xFF]);
+  var out=new Uint8Array(bytes.length+chunk.length);
+  out.set(bytes.subarray(0,iend.start),0);
+  out.set(Uint8Array.from(chunk),iend.start);
+  out.set(bytes.subarray(iend.start),iend.start+chunk.length);
+  return out;
+}
+function pngExtractText(bytes,keyword){
+  var chunks=pngChunks(bytes);if(!chunks)return null;
+  for(var i=0;i<chunks.length;i++){
+    var ch=chunks[i];
+    if(ch.type!=='tEXt'||ch.start+8+ch.len>bytes.length)continue;
+    var d=bytes.subarray(ch.start+8,ch.start+8+ch.len);
+    var z=-1;for(var j=0;j<d.length;j++)if(d[j]===0){z=j;break}
+    if(z<0)continue;
+    var kw='';for(var j=0;j<z;j++)kw+=String.fromCharCode(d[j]);
+    if(kw!==keyword)continue;
+    var txt='';for(var j=z+1;j<d.length;j++)txt+=String.fromCharCode(d[j]);
+    return txt;
+  }
+  return null;
+}
+function b64EncodeUtf8(str){return btoa(unescape(encodeURIComponent(str)))}
+function b64DecodeUtf8(b64){return decodeURIComponent(escape(atob(b64)))}
+// CERT-CORE-END
+
+var CERT_KEYWORD='typingAdventureSave';
+
+function certMsg(text,isError){
+  var el=document.getElementById('certMsg');if(!el)return;
+  el.textContent=text;
+  el.style.color=isError?'#ff9a9a':'#ffe066';
+  clearTimeout(certMsg._t);
+  certMsg._t=setTimeout(function(){el.textContent=''},7000);
+}
+
+function certData(name){
+  return {kind:CERT_KEYWORD,v:1,name:name,savedAt:new Date().toISOString().slice(0,10),
+    score:score,score_cloud:cloudScore,score_soup:soupScore,score_unicorn:unicornScore,
+    progress_cloud:cloudProgress,progress_soup:soupProgress,progress_unicorn:unicornProgress};
+}
+
+function drawCertificate(c,W,H,d){
+  var g=c.createLinearGradient(0,0,W*.25,H);
+  g.addColorStop(0,'#0d0520');g.addColorStop(.4,'#1a0a2e');g.addColorStop(.7,'#4a1942');g.addColorStop(1,'#c96b3a');
+  c.fillStyle=g;c.fillRect(0,0,W,H);
+  for(var i=0;i<70;i++){
+    c.fillStyle='rgba(255,255,255,'+(0.12+Math.random()*0.45)+')';
+    c.beginPath();c.arc(Math.random()*W,Math.random()*H,Math.random()*2.5+.5,0,Math.PI*2);c.fill();
+  }
+  c.strokeStyle='#ffe066';c.lineWidth=10;c.strokeRect(30,30,W-60,H-60);
+  c.strokeStyle='rgba(255,224,102,.5)';c.lineWidth=2;c.strokeRect(52,52,W-104,H-104);
+  c.textAlign='center';c.textBaseline='middle';
+  c.font='40px serif';
+  c.fillText('⭐',78,80);c.fillText('⭐',W-78,80);c.fillText('⭐',78,H-82);c.fillText('⭐',W-78,H-82);
+  var cx=W/2,fam='"Comic Sans MS","Chalkboard SE",cursive';
+  c.fillStyle='#fff';c.font='bold 62px '+fam;
+  c.fillText('✨ Typing Adventure ✨',cx,140);
+  c.fillStyle='#f0c0e0';c.font='28px '+fam;
+  c.fillText('CERTIFICATE OF PROGRESS',cx,204);
+  c.font='26px '+fam;
+  c.fillText('This certifies that',cx,288);
+  c.fillStyle='#ffe066';c.font='bold 56px '+fam;
+  c.fillText(d.name,cx,356);
+  var nw=Math.min(c.measureText(d.name).width+60,W*.7);
+  c.strokeStyle='rgba(255,224,102,.6)';c.lineWidth=3;
+  c.beginPath();c.moveTo(cx-nw/2,396);c.lineTo(cx+nw/2,396);c.stroke();
+  c.fillStyle='#f0c0e0';c.font='26px '+fam;
+  c.fillText('is on an amazing typing quest!',cx,440);
+  var rows=[['☁️ Cloud Letters',d.progress_cloud,d.score_cloud],
+            ['🍜 Alphabet Soup',d.progress_soup,d.score_soup],
+            ['🦄 Unicorn World',d.progress_unicorn,d.score_unicorn]];
+  c.font='28px '+fam;
+  rows.forEach(function(r,i){
+    var y=516+i*54;
+    var lvl=Math.min(((r[1]&&r[1].level)||0)+1,LEVELS.length);
+    c.textAlign='left';c.fillStyle='#f0c0e0';c.fillText(r[0],cx-330,y);
+    c.textAlign='right';c.fillStyle='#fff';c.fillText('Level '+lvl+'   ·   ⭐ '+(r[2]||0)+' pts',cx+330,y);
+  });
+  c.strokeStyle='rgba(255,255,255,.25)';c.lineWidth=2;
+  c.beginPath();c.moveTo(cx-330,668);c.lineTo(cx+330,668);c.stroke();
+  c.textAlign='left';c.fillStyle='#f0c0e0';c.font='bold 32px '+fam;
+  c.fillText('Total Score',cx-330,716);
+  c.textAlign='right';c.fillStyle='#ffe066';
+  c.fillText('⭐ '+(d.score||0),cx+330,716);
+  c.textAlign='center';c.fillStyle='#fff';c.font='24px '+fam;
+  c.fillText('Saved on '+new Date().toLocaleDateString(undefined,{year:'numeric',month:'long',day:'numeric'}),cx,786);
+  c.fillStyle='rgba(240,192,224,.85)';c.font='italic 21px '+fam;
+  c.fillText('Keep this file safe — upload it in Typing Adventure to continue your quest!',cx,832);
+}
+
+function downloadCertificate(){
+  var name=prompt('Who is this certificate for?','Super Typist');
+  name=(name||'').trim().slice(0,24)||'Super Typist';
+  var cert=document.createElement('canvas');cert.width=1200;cert.height=900;
+  var d=certData(name);
+  drawCertificate(cert.getContext('2d'),cert.width,cert.height,d);
+  cert.toBlob(function(blob){
+    if(!blob){certMsg('Sorry, the certificate could not be created.',true);return}
+    blob.arrayBuffer().then(function(buf){
+      var out=pngInsertText(new Uint8Array(buf),CERT_KEYWORD,b64EncodeUtf8(JSON.stringify(d)));
+      if(!out){certMsg('Sorry, the certificate could not be created.',true);return}
+      var url=URL.createObjectURL(new Blob([out],{type:'image/png'}));
+      var a=document.createElement('a');
+      a.href=url;a.download='typing-adventure-certificate.png';
+      document.body.appendChild(a);a.click();a.remove();
+      setTimeout(function(){URL.revokeObjectURL(url)},5000);
+      certMsg('📜 Certificate saved! Upload it later to continue your quest.');
+    });
+  },'image/png');
+}
+
+function certValidProgress(p){
+  if(!p||typeof p!=='object')return {level:0,wordIdx:0,wordList:null};
+  var lvl=Math.min(Math.max(parseInt(p.level,10)||0,0),LEVELS.length-1);
+  var list=Array.isArray(p.wordList)&&p.wordList.length>0&&p.wordList.every(function(w){return typeof w==='string'})?p.wordList:null;
+  var idx=Math.max(parseInt(p.wordIdx,10)||0,0);
+  if(!list||idx>list.length)idx=0;
+  return {level:lvl,wordIdx:idx,wordList:list};
+}
+
+function loadCertificate(file){
+  file.arrayBuffer().then(function(buf){
+    var txt=pngExtractText(new Uint8Array(buf),CERT_KEYWORD);
+    if(!txt)throw new Error('no save data');
+    var d=JSON.parse(b64DecodeUtf8(txt));
+    if(!d||d.kind!==CERT_KEYWORD)throw new Error('bad payload');
+    score=Math.max(0,parseInt(d.score,10)||0);
+    cloudScore=Math.max(0,parseInt(d.score_cloud,10)||0);
+    soupScore=Math.max(0,parseInt(d.score_soup,10)||0);
+    unicornScore=Math.max(0,parseInt(d.score_unicorn,10)||0);
+    cloudProgress=certValidProgress(d.progress_cloud);
+    soupProgress=certValidProgress(d.progress_soup);
+    unicornProgress=certValidProgress(d.progress_unicorn);
+    saveState();updateScoreUI();
+    certMsg('🎉 Welcome back'+(typeof d.name==='string'&&d.name?', '+d.name:'')+'! Your progress is restored.');
+  }).catch(function(){
+    certMsg("Hmm, that doesn't look like a Typing Adventure certificate. Upload the exact PNG you downloaded.",true);
+  });
+}
+
+document.getElementById('certUpload').addEventListener('change',function(){
+  if(this.files&&this.files[0])loadCertificate(this.files[0]);
+  this.value='';
+});
 
 // ── AUDIO ──
 function getAudio(){if(!audioCtx)audioCtx=new(window.AudioContext||window.webkitAudioContext)();return audioCtx}
@@ -1468,6 +1661,6 @@ function loop(){
 loadState();
 updateScoreUI();
 </script>
-<div id="versionDisplay">v1.3.2</div>
+<div id="versionDisplay">v1.4.0</div>
 </body>
 </html>
